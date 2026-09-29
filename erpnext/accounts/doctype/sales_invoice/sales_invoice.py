@@ -328,7 +328,7 @@ class SalesInvoice(SellingController):
 			self.doctype, self.customer, self.company, self.inter_company_invoice_reference
 		)
 
-		if self.coupon_code:
+		if self.coupon_code and not self._skip_coupon_validation():
 			validate_coupon_code(self.coupon_code)
 
 		if cint(self.is_pos):
@@ -492,7 +492,7 @@ class SalesInvoice(SellingController):
 			self.update_project()
 		update_linked_doc(self.doctype, self.name, self.inter_company_invoice_reference)
 
-		if self.coupon_code:
+		if self.coupon_code and not self._skip_coupon_validation():
 			update_coupon_code_count(self.coupon_code, "used")
 
 		if (
@@ -558,7 +558,7 @@ class SalesInvoice(SellingController):
 
 		self.db_set("status", "Cancelled")
 
-		if self.coupon_code:
+		if self.coupon_code and not self._skip_coupon_validation():
 			update_coupon_code_count(self.coupon_code, "cancelled")
 
 		if frappe.get_single_value("Selling Settings", "sales_update_frequency") == "Each Transaction":
@@ -980,6 +980,20 @@ class SalesInvoice(SellingController):
 	def validate_account_for_change_amount(self):
 		if flt(self.change_amount) and not self.account_for_change_amount:
 			msgprint(_("Please enter Account for Change Amount"), raise_exception=1)
+
+	def _skip_coupon_validation(self):
+		"""Skip coupon validation when the coupon has already been validated and counted elsewhere."""
+		if self.get("is_return") or self.get("is_consolidated"):
+			return True
+
+		# Skip if this invoice is from a Sales Order that already has the same coupon
+		for item in self.items:
+			if item.get("sales_order"):
+				so_coupon = frappe.db.get_value("Sales Order", item.sales_order, "coupon_code")
+				if so_coupon == self.coupon_code:
+					return True
+
+		return False
 
 	def validate_debit_note_with_update_stock(self):
 		"""Prevent stock update when Sales Invoice is marked as Debit Note."""

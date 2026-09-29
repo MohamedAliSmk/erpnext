@@ -620,3 +620,63 @@ class TestPOSInvoiceMergeLog(ERPNextTestSuite):
 				flt(frappe.db.get_value("Sales Invoice", consolidated_name, "grand_total"), 2),
 				flt(handed_back, 2),
 			)
+
+	def test_pos_closing_with_single_use_coupon(self):
+		"""Test that a single-use coupon on a POS Invoice doesn't get re-counted when consolidated."""
+		# Create a pricing rule and coupon
+		if not frappe.db.exists("Pricing Rule", {"title": "_Test POS Coupon Pricing Rule"}):
+			pricing_rule = frappe.get_doc(
+				{
+					"doctype": "Pricing Rule",
+					"title": "_Test POS Coupon Pricing Rule",
+					"apply_on": "Item Code",
+					"items": [{"item_code": "_Test Item"}],
+					"warehouse": "_Test Warehouse - _TC",
+					"coupon_code_based": 1,
+					"selling": 1,
+					"rate_or_discount": "Discount Percentage",
+					"discount_percentage": 10,
+					"company": "_Test Company",
+					"currency": "INR",
+				}
+			).insert(ignore_permissions=True)
+		else:
+			pricing_rule = frappe.get_doc(
+				"Pricing Rule", {"title": "_Test POS Coupon Pricing Rule"}
+			)
+
+		frappe.delete_doc_if_exists("Coupon Code", "_Test POS Single Use")
+		coupon = frappe.get_doc(
+			{
+				"doctype": "Coupon Code",
+				"coupon_name": "_Test POS Single Use",
+				"coupon_code": "_Test POS Single Use",
+				"coupon_type": "Gift Card",
+				"pricing_rule": pricing_rule.name,
+				"maximum_use": 1,
+				"used": 0,
+				"customer": "_Test Customer",
+			}
+		).insert(ignore_permissions=True)
+
+		# Create a POS Invoice with the coupon
+		pos_inv = create_pos_invoice(rate=1000, do_not_submit=1)
+		pos_inv.coupon_code = coupon.name
+		pos_inv.append("payments", {"mode_of_payment": "Cash", "account": "Cash - _TC", "amount": 900})
+		pos_inv.save()
+		pos_inv.submit()
+
+		# Verify coupon is counted once
+		coupon.reload()
+		self.assertEqual(coupon.used, 1)
+
+		# Close POS and create consolidated invoice
+		self.make_closing_entry()
+
+		# Verify coupon is still counted once (not re-counted on consolidation)
+		coupon.reload()
+		self.assertEqual(coupon.used, 1)
+
+		# Verify the consolidated invoice was created
+		pos_inv.load_from_db()
+		self.assertTrue(frappe.db.exists("Sales Invoice", pos_inv.consolidated_invoice))

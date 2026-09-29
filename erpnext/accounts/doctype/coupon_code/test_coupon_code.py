@@ -273,3 +273,126 @@ class TestCouponCode(ERPNextTestSuite):
 		update_coupon_code_count("_Test Coupon Count", "used")
 		self.assertEqual(frappe.db.get_value("Coupon Code", "_Test Coupon Count", "used"), 2)
 		self.assertRaises(frappe.ValidationError, update_coupon_code_count, "_Test Coupon Count", "used")
+
+	def test_coupon_counted_once_on_sales_order_to_invoice(self):
+		"""Test that a single-use coupon on a Sales Order can be invoiced without double-counting."""
+		from erpnext.selling.doctype.sales_order.test_sales_order import make_sales_order
+
+		pricing_rule = frappe.db.get_value("Pricing Rule", {"title": "_Test Pricing Rule for _Test Item"})
+		frappe.delete_doc_if_exists("Coupon Code", "_Test Single Use Invoice")
+		coupon = frappe.get_doc(
+			{
+				"doctype": "Coupon Code",
+				"coupon_name": "_Test Single Use Invoice",
+				"coupon_code": "_Test Single Use Invoice",
+				"coupon_type": "Gift Card",
+				"pricing_rule": pricing_rule,
+				"maximum_use": 1,
+				"used": 0,
+				"customer": "_Test Customer",
+			}
+		).insert(ignore_permissions=True)
+
+		# Create and submit Sales Order with coupon
+		so = make_sales_order(
+			company="_Test Company",
+			warehouse="Stores - _TC",
+			customer="_Test Customer",
+			selling_price_list="_Test Price List",
+			item_code="_Test Tesla Car",
+			rate=5000,
+			qty=1,
+			do_not_save=True,
+		)
+		so.coupon_code = coupon.name
+		so.insert()
+		so.submit()
+
+		# Verify coupon is counted once
+		coupon.reload()
+		self.assertEqual(coupon.used, 1)
+
+		# Create Sales Invoice from Sales Order
+		from erpnext.selling.doctype.sales_order.mapper import make_sales_invoice
+
+		si = make_sales_invoice(so.name)
+		si.insert()
+
+		# Verify coupon is still counted once (not double-counted)
+		coupon.reload()
+		self.assertEqual(coupon.used, 1)
+
+		# Submit the invoice
+		si.submit()
+
+		# Verify coupon is still counted once
+		coupon.reload()
+		self.assertEqual(coupon.used, 1)
+
+		# Cancel the invoice
+		si.cancel()
+
+		# Verify coupon count stays at 1 (Sales Order still owns the count)
+		coupon.reload()
+		self.assertEqual(coupon.used, 1)
+
+		# Cancel the Sales Order
+		so.reload()
+		so.cancel()
+
+		# Now the count should go to 0
+		coupon.reload()
+		self.assertEqual(coupon.used, 0)
+
+	def test_coupon_on_return_invoice(self):
+		"""Test that returning an invoice with a coupon doesn't re-count it."""
+		from erpnext.accounts.doctype.sales_invoice.test_sales_invoice import create_sales_invoice
+
+		pricing_rule = frappe.db.get_value("Pricing Rule", {"title": "_Test Pricing Rule for _Test Item"})
+		frappe.delete_doc_if_exists("Coupon Code", "_Test Return Coupon")
+		coupon = frappe.get_doc(
+			{
+				"doctype": "Coupon Code",
+				"coupon_name": "_Test Return Coupon",
+				"coupon_code": "_Test Return Coupon",
+				"coupon_type": "Promotional",
+				"pricing_rule": pricing_rule,
+				"maximum_use": 5,
+				"used": 0,
+			}
+		).insert(ignore_permissions=True)
+
+		# Create and submit Sales Invoice with coupon
+		si = create_sales_invoice(
+			company="_Test Company",
+			customer="_Test Customer",
+			item_code="_Test Tesla Car",
+			warehouse="Stores - _TC",
+			rate=5000,
+			qty=1,
+			do_not_save=True,
+		)
+		si.coupon_code = coupon.name
+		si.insert()
+		si.submit()
+
+		# Verify coupon is counted once
+		coupon.reload()
+		self.assertEqual(coupon.used, 1)
+
+		# Create credit note (return)
+		from erpnext.accounts.doctype.sales_invoice.mapper import make_sales_return
+
+		credit_note = make_sales_return(si.name)
+		credit_note.insert()
+
+		# Verify coupon count is still 1 before submit
+		coupon.reload()
+		self.assertEqual(coupon.used, 1)
+
+		# Submit the credit note
+		credit_note.submit()
+
+		# Verify coupon count is still 1 (return doesn't re-count)
+		coupon.reload()
+		self.assertEqual(coupon.used, 1)
